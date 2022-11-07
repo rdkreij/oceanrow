@@ -9,5 +9,5 @@ Python script to optimize ocean rowing routes.
 * User friendly
 * Imports module from 'mod_ocean_row.py'
 
-# Copyright
+## Copyright
 Author of this source code will retain copyright
