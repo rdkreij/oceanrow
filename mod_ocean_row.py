@@ -453,7 +453,7 @@ class ocean_row:
         return fig,ax
     
     @staticmethod
-    def plt_hindcast(hc,ptype):
+    def plt_hindcast(hc,pvar,ptype='month_mean_all'):
         '''
         Plot montly average of hindcast data
         
@@ -464,13 +464,17 @@ class ocean_row:
                 dsa: air
                 dsw: water 
                 dswh: wave height
-        ptype: string
-            plot type
+        pvar: string
+            plot variable
                 water velocity
                 water temperature
                 air velocity
                 daily wave height max
                 daily wave height mean
+        ptype: string
+            plot type
+                month_mean_all: mean per month of all available data
+                month_mean_annual: mean per month per year
         
         Returns
         -------
@@ -484,9 +488,8 @@ class ocean_row:
         xlims = [30,130] # longitude limits [deg]
         ylims = [-40,0] # latitude limits [deg]
 
-        if ptype == 'water velocity':
+        if pvar == 'water velocity':
             ds     = hc['dsw']
-            months = pd.DatetimeIndex(ds.time.values).month
             u      = ds.uw*tokts
             v      = ds.vw*tokts
             z      = np.sqrt(u**2+v**2)      
@@ -495,55 +498,61 @@ class ocean_row:
             pmax   = 1.5
             qscale = .2
             unit   = 'kts'
-        elif ptype == 'water temperature':
+        elif pvar == 'water temperature':
             ds     = hc['dsw']
-            months = pd.DatetimeIndex(ds.time.values).month
             z      = ds.Tw     
 
             pmin   = 18
             pmax   = 32
             unit   = 'K'
-        elif ptype == 'air velocity':
+        elif pvar == 'air velocity':
             ds     = hc['dsa']
-            months = pd.DatetimeIndex(ds.time.values).month
             u      = ds.ua*tokts
             v      = ds.va*tokts
             z      = np.sqrt(u**2+v**2)  
 
             pmin   = 0
-            pmax   = 15
+            pmax   = 20
             qscale = 2
             unit   = 'kts'
-        elif ptype == 'daily wave height max':
+        elif pvar == 'daily wave height max':
             ds     = hc['dswh']
-            months = pd.DatetimeIndex(ds.time.values).month
             z      = ds.H_day_max
 
             pmin   = 0
             pmax   = 4
             unit   = 'm'
-        elif ptype == 'daily wave height mean':
+        elif pvar == 'daily wave height mean':
             ds     = hc['dswh']
-            months = pd.DatetimeIndex(ds.time.values).month
             z      = ds.H_day_mean
 
             pmin   = 0
             pmax   = 4
             unit   = 'm'   
-        x = ds.lon.values
-        y = ds.lat.values
-        X,Y = np.meshgrid(x,y)
+            
+        if ptype == 'month_mean_all':
+            time      = pd.DatetimeIndex(ds.time.values).month
+            time_unq  = np.sort(np.unique(time))
+            timelabel = [calendar.month_name[timei] for timei in time_unq]
+        elif ptype == 'month_mean_annual':
+            time      = ds.time.values.astype('datetime64[M]')
+            time_unq  = np.sort(np.unique(time))
+            timelabel = [str(timei) for timei in time_unq]
+        
+        x   = ds.lon.values
+        y   = ds.lat.values
+        X,Y = np.meshgrid(x,y)      
 
-        for i in range(1,13):
-            zi     = z.isel(time=(months==i)).mean('time').values
+        for i in range(len(time_unq)):
+            zi     = z.isel(time=(time==time_unq[i])).mean('time').values
             fig,ax = ocean_row.plt_base_simple(xlims,ylims,10,10)
             im = ocean_row.plt_modified_imshow(x,y,zi,ax=ax,cb=True,vmin=pmin,vmax=pmax,cmap='turbo')
-            if (ptype == 'water velocity') | (ptype == 'air velocity'):
-                ui   = u.isel(time=(months==i)).mean('time').values
-                vi   = v.isel(time=(months==i)).mean('time').values
+            if (pvar == 'water velocity') | (pvar == 'air velocity'):
+                ui   = u.isel(time=(time==time_unq[i])).mean('time').values
+                vi   = v.isel(time=(time==time_unq[i])).mean('time').values
                 qidx = int(np.ceil(X.shape[1]/30))
                 ax.quiver(X[::qidx,::qidx],Y[::qidx,::qidx],ui[::qidx,::qidx],vi[::qidx,::qidx],units='xy',scale_units='xy',scale=qscale)
-            ax.set(xlim=xlims,ylim=ylims,title=f'{calendar.month_name[i]}, {ptype} ({unit})')
+            ax.set(xlim=xlims,ylim=ylims,title=f'{timelabel[i]}, {pvar} ({unit})')
             plt.show()  
         pass
     
@@ -731,9 +740,51 @@ class ocean_row:
         return Xaf,idxkeep
     
     @staticmethod
-    def get_hindcast_at_loc(X_a,datet,dsa,dsw,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat):
+    def linear_weight(x,xp):
         '''
-        Get the hindcast velocities (air and water) at given boat locations
+        Parameters
+        ----------
+        x: array
+            axis values
+        xp: scalar
+            point on axis
+        
+        Returns
+        ib: list
+            neighbour index
+        wb: list
+            weight neighbour
+        -------
+        '''
+        ix  = np.argmin(np.abs(x-xp))
+        xix = x[ix]
+
+        if xix == xp:
+            wb = [1]
+            ib = [ix]
+        else:
+            if xix > xp:
+                ix0 = ix-1
+                ix1 = ix
+            elif xix <= xp:
+                ix0 = ix
+                ix1 = ix+1
+                
+            if (ix0<0) | (ix1>=len(x)):
+                ib = [np.nan]
+                wb = [np.nan]
+            else:
+                x0 = x[ix0]
+                x1 = x[ix1]
+                dx  = x1-x0
+                ib = [ix0,ix1]
+                wb = [(x1-xp)/dx,(xp-x0)/dx]
+        return ib,wb
+
+    @staticmethod
+    def get_hindcast_at_loc(X_a,datet,dsa_uv,dsw_uv,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat):
+        '''
+        Get the hindcast velocities (air and water) at given boat locations using trilinear interpolation
         
         Parameters
         ----------
@@ -741,10 +792,10 @@ class ocean_row:
             N boat locations [N,2]
         datet: datetime
             time
-        dsa: xarray
-            full dataset air
-        dsw: xarray
-            full dataset water
+        dsa_uv: matrix [2,:,:,:]
+            full dataset air velocities (stacked)
+        dsw_uv: matrx [2,:,:,:]
+            full dataset water velocities (stacked)
         dsa_time: vector
             coordinate
         dsa_lon: vector
@@ -767,25 +818,39 @@ class ocean_row:
         '''
         N = X_a.shape[0]
 
-        iatime = np.argmin(np.abs(dsa_time-datet))
-        iwtime = np.argmin(np.abs(dsw_time-datet))
-
         Va_a = np.empty([N,2])
         Vw_a = np.empty([N,2])
 
-        for iX in range(N): # loop over all locations
-            Xi = X_a[iX,:]
+        iat,wat = ocean_row.linear_weight(dsa_time,datet)
+        iwt,wwt = ocean_row.linear_weight(dsw_time,datet)
 
-            ialon = np.argmin(np.abs(dsa_lon-Xi[0]))
-            ialat = np.argmin(np.abs(dsa_lat-Xi[1]))
+        for i in range(N): # loop over all locations
+            iax,wax = ocean_row.linear_weight(dsa_lon,X_a[i,0])
+            iay,way = ocean_row.linear_weight(dsa_lat,X_a[i,1])
 
-            iwlon = np.argmin(np.abs(dsw_lon-Xi[0]))
-            iwlat = np.argmin(np.abs(dsw_lat-Xi[1]))
+            iaxf,iayf,iatf = [A.flatten() for A in np.meshgrid(iax,iay,iat,indexing='ij')]
+            waxf,wayf,watf = [A.flatten() for A in np.meshgrid(wax,way,wat,indexing='ij')]
 
-            Va_a[iX,0] = dsa.isel(time=iatime,lon=ialon,lat=ialat).ua.item()
-            Va_a[iX,1] = dsa.isel(time=iatime,lon=ialon,lat=ialat).va.item()
-            Vw_a[iX,0] = dsw.isel(time=iwtime,lon=iwlon,lat=iwlat).uw.item()
-            Vw_a[iX,1] = dsw.isel(time=iwtime,lon=iwlon,lat=iwlat).vw.item()
+            if any(np.isnan(iaxf))|any(np.isnan(iayf))|any(np.isnan(iatf)):
+                Va_a[i,0] = np.nan
+                Va_a[i,1] = np.nan
+            else:
+                Va_a[i,0] = np.sum(dsa_uv[0,iatf,iayf,iaxf]*waxf*wayf*watf)
+                Va_a[i,1] = np.sum(dsa_uv[1,iatf,iayf,iaxf]*waxf*wayf*watf)
+
+            iwx,wwx = ocean_row.linear_weight(dsw_lon,X_a[i,0])
+            iwy,wwy = ocean_row.linear_weight(dsw_lat,X_a[i,1])
+
+            iwxf,iwyf,iwtf = [A.flatten() for A in np.meshgrid(iwx,iwy,iwt,indexing='ij')]
+            wwxf,wwyf,wwtf = [A.flatten() for A in np.meshgrid(wwx,wwy,wwt,indexing='ij')]
+
+            if any(np.isnan(iwxf))|any(np.isnan(iwyf))|any(np.isnan(iwtf)):
+                Vw_a[i,0] = np.nan
+                Vw_a[i,1] = np.nan
+            else:
+                Vw_a[i,0] = np.sum(dsw_uv[0,iwtf,iwyf,iwxf]*wwxf*wwyf*wwtf)
+                Vw_a[i,1] = np.sum(dsw_uv[1,iwtf,iwyf,iwxf]*wwxf*wwyf*wwtf)
+            
 
         return Va_a,Vw_a
 
@@ -921,16 +986,16 @@ class ocean_row:
         V_a      = np.array([0,0]) # boat velocity
 
         # datasets
-        dsa = hc['dsa'] # hindcast air speeds
-        dsw = hc['dsw'] # hindcast water speed
+        dsa_uv = np.stack([hc['dsa'].ua.values,hc['dsa'].va.values]) # hindcast air speeds
+        dsw_uv = np.stack([hc['dsw'].uw.values,hc['dsw'].vw.values]) # hindcast water speeds
         
         # dataset coordinates
-        dsa_time = dsa.time.values
-        dsa_lon  = dsa.lon.values
-        dsa_lat  = dsa.lat.values
-        dsw_time = dsw.time.values
-        dsw_lon  = dsw.lon.values
-        dsw_lat  = dsw.lat.values
+        dsa_time = hc['dsa'].time.values
+        dsa_lon  = hc['dsa'].lon.values
+        dsa_lat  = hc['dsa'].lat.values
+        dsw_time = hc['dsw'].time.values
+        dsw_lon  = hc['dsw'].lon.values
+        dsw_lat  = hc['dsw'].lat.values
 
         # allocate
         Xs     = np.empty([imax,Np,2]); Xs.fill(np.nan) # locations
@@ -965,11 +1030,12 @@ class ocean_row:
         while (i < (imax-1)) & np.all(rto > rtmin): # start loop       
             
             # get hindcast data
-            Va_a,Vw_a = self.get_hindcast_at_loc(X_a,datet,dsa,dsw,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat)
+            Va_a,Vw_a = self.get_hindcast_at_loc(X_a,datet,dsa_uv,dsw_uv,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat)
 
-            # set hindcast velocities to zero when no data is available
-            Va_a[np.isnan(Va_a)] = 0
-            Vw_a[np.isnan(Vw_a)] = 0
+            if filters_on == False:
+                # set hindcast velocities to zero when no data is available
+                Va_a[np.isnan(Va_a)] = 0
+                Vw_a[np.isnan(Vw_a)] = 0
 
             # store values
             Xs    [i,0:N,:] = X_a 
@@ -1169,7 +1235,7 @@ class ocean_row:
             
         iend = i # last iteration
         
-        Va_a,Vw_a = self.get_hindcast_at_loc(X_a,datet,dsa,dsw,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat)
+        Va_a,Vw_a = self.get_hindcast_at_loc(X_a,datet,dsa_uv,dsw_uv,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat)
         
         # store last iteration 
         Xs    [iend,0:N,:] = X_a
@@ -1288,16 +1354,16 @@ class ocean_row:
         N = len(datets) # number of steps
 
         # datasets
-        dsa = hc['dsa'] # hindcast air speeds
-        dsw = hc['dsw'] # hindcast water speed
+        dsa_uv = np.stack([hc['dsa'].ua.values,hc['dsa'].va.values])
+        dsw_uv = np.stack([hc['dsw'].uw.values,hc['dsw'].vw.values])
 
         # dataset coordinates
-        dsa_time = dsa.time.values
-        dsa_lon  = dsa.lon.values
-        dsa_lat  = dsa.lat.values
-        dsw_time = dsw.time.values
-        dsw_lon  = dsw.lon.values
-        dsw_lat  = dsw.lat.values
+        dsa_time = hc['dsa'].time.values
+        dsa_lon  = hc['dsa'].lon.values
+        dsa_lat  = hc['dsa'].lat.values
+        dsw_time = hc['dsw'].time.values
+        dsw_lon  = hc['dsw'].lon.values
+        dsw_lat  = hc['dsw'].lat.values
 
         # allocate
         Vb = np.empty([N,2])
@@ -1312,7 +1378,7 @@ class ocean_row:
                 Vb[i] = ocean_row.coords_to_boat_velocity(Xa[i],Xa[i+1],datets[i],datets[i+1])
 
             # hindcast
-            Va[i],Vw[i] = [x[0] for x in ocean_row.get_hindcast_at_loc(np.array([Xa[i]]),datets[i],dsa,dsw,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat)]
+            Va[i],Vw[i] = [x[0] for x in ocean_row.get_hindcast_at_loc(np.array([Xa[i]]),datets[i],dsa_uv,dsw_uv,dsa_time,dsa_lon,dsa_lat,dsw_time,dsw_lon,dsw_lat)]
         
         return Vb,Va,Vw
 
