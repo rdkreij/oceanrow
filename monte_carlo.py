@@ -3,6 +3,10 @@ from   scipy.optimize import root
 from   geographiclib.geodesic      import Geodesic    
 from mod_ocean_row import ocean_row 
 from dataclasses import dataclass
+from random import choice
+import datetime
+import cartopy.feature             as cfeature
+from   shapely.geometry            import Point
 
 @dataclass
 class State:
@@ -64,13 +68,14 @@ class boat:
     
 
 class ocean:
-    def __init__(self, hc, start_time, target, boat):
+    def __init__(self, hc, domain, start_time, target, boat):
         self.hc = hc
         self.boat = boat
-        self.start_time = start_time
+        self.start_time: np.datetime64 = start_time
         self.target = target
+        self.domain = domain
 
-
+        self.TARGET_AREA = 100 * 1000 # radius in meters
         self.TIMESTEP_SIZE = 10_000
         
     def get_velocities(self, time, positions):
@@ -161,7 +166,7 @@ class ocean:
     def start(self):
         # Returns a representation of the starting state of the ocean
         lat, lon = self.boat.start_lat, self.boat.start_lon
-        return (self.start_time, lat, lon)
+        return State(self.start_time, lat, lon)
     
     def get_ed(self, lat, lon, phi):
         # Returns the rowing direction
@@ -180,12 +185,26 @@ class ocean:
         azi1 = ocean_row.angle_between([0,1], v)
         s12  = vmag * dt
         
-        print("geodesic:",Geodesic.WGS84.Direct(lat, lon, azi1, s12))
-
         Xnew = np.array(list(  map(Geodesic.WGS84.Direct(lat, lon, azi1, s12).get, ['lon2','lat2'])  )) # new location
         
         return Xnew[0], Xnew[1]
-    
+
+    def reward(self, s: State):
+        # Returns the reward for the current state
+        # reward is negative distance to target
+
+        r = 0
+
+        multiplier = 1
+        # check if the state is out of bounds
+        if np.logical_not(Point([s.lon, s.lat]).intersects(self.domain)):
+            multiplier = 4
+
+
+        r += -Geodesic.WGS84.Inverse(s.lat, s.lon, self.target[0], self.target[1])['s12'] / 1000
+        return r * multiplier
+
+
     def next_state(self, s: State, action: Action):
         # Takes the state, and the move to be applied.
         # Returns the new state.
@@ -195,38 +214,65 @@ class ocean:
         # Calculate the velocity applied to the boat
         V = self.solve_v(s, phi, action.is_rowing, action.is_anchored)    
 
-        updated_lat, updated_lon = self.update_coordate_with_velocity(s.lat, s.lon, V, self.TIMESTEP_SIZE)
+        updated_lon, updated_lat = self.update_coordate_with_velocity(s.lat, s.lon, V, self.TIMESTEP_SIZE)
 
-        return State(s.t + self.TIMESTEP_SIZE, updated_lat, updated_lon)
+        new_state = State(s.t + self.TIMESTEP_SIZE, updated_lat, updated_lon)    
+        reward = self.reward(new_state)
+
+        return reward, new_state
 
 
     def legal_moves(self, state_history):
         # Takes a sequence of game states representing the full
         # game history, and returns the full list of moves that
         # are legal plays for the current player.
-        
-        # get_rowing_activity
-        pass
-        
+
+        actions = []
+
+        # Rowing
+        for phi in range(-180, 180, 10):
+            actions.append(Action(True, phi = phi))
+
+        # Non rowing        
+        actions.append(Action(False, anchor = False))
+        actions.append(Action(False, anchor = True))
+
+        return actions
+
+    def distance_to_target(self, state: State):
+        # Returns the distance to the target
+        return Geodesic.WGS84.Inverse(state.lat, state.lon, self.target[0], self.target[1])['s12']        
+
+    def target_reached(self, state: State):
+        # Returns True if the state is within the target area
+        dist = self.distance_to_target(state)
+        return dist < self.TARGET_AREA
+
     def winner(self, state_history):
         # Takes a sequence of game states representing the full
         # game history.  If the target is reached, return 1.  
         # If the row did not reach the target, return zero.
-        pass
+        
+        # check if target is reached
+        if self.target_reached(state_history[-1]):
+            return 1
+        else:
+            return 0
+
         
 class MonteCarlo:
     def __init__(self, sea, **kwargs):
         # Takes an instance of an ocean and optionally some keyword
         # arguments.  Initializes the list of game states and the
         # statistics tables.
-        self.sea = sea
+        self.sea: ocean = sea
         self.states = []
         seconds = kwargs.get('time', 30)
         self.calculation_time = datetime.timedelta(seconds=seconds)
         self.max_moves = kwargs.get('max_moves', 100)
 
 
-    def update(self, state):
+    def update(self, state: State):
         # Takes an ocean state, and appends it to the history.
         self.states.append(state)
 
@@ -241,17 +287,21 @@ class MonteCarlo:
         # Plays out a "random" game from the current position,
         # then updates the statistics tables with the result.
         states_copy = self.states[:]
+        actions = []
         state = states_copy[-1]
 
-        for t in xrange(self.max_moves):
+
+        for t in range(self.max_moves):
             legal = self.sea.legal_moves(states_copy)
 
             play = choice(legal)
             state = self.sea.next_state(state, play)
             states_copy.append(state)
 
-            winner = self.board.winner(states_copy)
+            winner = self.sea.winner(states_copy)
             if winner:
                 break
+
+        return states_copy
         
         
